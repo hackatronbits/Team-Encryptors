@@ -1,0 +1,10 @@
+2025-05-07 09:50:31.473770 - Redaction error: Matrix: bad seq len
+Traceback (most recent call last):
+  File "C:\Users\sunny\finalSecurePDF\app.py", line 177, in <module>
+    redact_pdf(st.session_state.input_path, st.session_state.redacted_path, ocr_text_pages)
+  File "C:\Users\sunny\finalSecurePDF\backend\pdf_writer.py", line 152, in redact_pdf
+    rect = fitz.Rect(span["bbox"]).transform(page.rect)  # Normalize bbox
+  File "C:\Users\sunny\anaconda3\envs\final_pdf_redactor\lib\site-packages\pymupdf\__init__.py", line 11321, in transform
+    raise ValueError("Matrix: bad seq len")
+ValueError: Matrix: bad seq len
+

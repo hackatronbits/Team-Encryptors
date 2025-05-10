@@ -1,0 +1,15 @@
+{
+    "pii_entities": [
+        "PERSON",
+        "PHONE_NUMBER",
+        "EMAIL_ADDRESS",
+        "CREDIT_CARD",
+        "ADDRESS",
+        "ORGANIZATION",
+        "LOCATION",
+        "AADHAAR",
+        "SSN",
+        "CUSTOM_ID",
+        "PAN"
+    ]
+}
