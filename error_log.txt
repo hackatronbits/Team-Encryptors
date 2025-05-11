@@ -8,3 +8,15 @@ Traceback (most recent call last):
     raise ValueError("Matrix: bad seq len")
 ValueError: Matrix: bad seq len
 
+2025-05-11 04:33:28.364405 - Redaction error: code=7: cannot find object in xref (62 0 R)
+Traceback (most recent call last):
+  File "C:\Users\sunny\zyx\app.py", line 177, in <module>
+    redact_pdf(st.session_state.input_path, st.session_state.redacted_path, ocr_text_pages)
+  File "C:\Users\sunny\zyx\backend\pdf_writer.py", line 231, in redact_pdf
+    doc.save(output_path, garbage=4, deflate=True, clean=True)
+  File "C:\Users\sunny\anaconda3\envs\pdfSecure\lib\site-packages\pymupdf\__init__.py", line 5580, in save
+    mupdf.pdf_save_document(pdf, filename, opts)
+  File "C:\Users\sunny\anaconda3\envs\pdfSecure\lib\site-packages\pymupdf\mupdf.py", line 53285, in pdf_save_document
+    return _mupdf.pdf_save_document(doc, filename, opts)
+pymupdf.mupdf.FzErrorFormat: code=7: cannot find object in xref (62 0 R)
+

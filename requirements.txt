@@ -1,0 +1,14 @@
+streamlit==1.38.0
+pymupdf==1.24.10
+PyPDF2==3.0.1
+pdfplumber==0.11.4
+pdf2image==1.17.0
+Pillow==10.4.0
+opencv-python==4.10.0.84
+numpy==1.26.4
+scipy==1.14.1
+pytesseract==0.3.13
+easyocr==1.7.1
+faker==28.4.1
+presidio-analyzer==2.2.355
+spacy==3.7.6
