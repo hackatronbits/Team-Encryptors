@@ -45,7 +45,8 @@ except OSError:
 # ----------------------------
 # Expanded PII Detection Configuration
 # ----------------------------
-PII_LABELS = ["PERSON", "GPE", "ORG", "DATE", "LOC", "NORP", "FAC"]
+PII_LABELS = ["PERSON", "GPE", "ORG", "DATE", "LOC", "NORP", "FAC","DOB","AGE","EMAIL","PHONE","SSN","PAN","AADHAR","BANK_ACC","CREDIT_CARD","IP_ADDRESS"]
+# These labels can be expanded based on the specific needs of the application.
 
 REGEX_PATTERNS = {
     "EMAIL": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
