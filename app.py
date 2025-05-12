@@ -1,338 +1,148 @@
-import streamlit as st
 import os
 import tempfile
-import time
-from PIL import Image
-import io
-import logging
+import streamlit as st
+from streamlit_pdf_viewer import pdf_viewer
 
-from backend.pii_detector import CUSTOM_PII_ENTITY_TEMPLATE
-from backend.pdf_loader import extract_pdf_text, get_pdf_metadata
-from backend.redactor import redact_pii
+from backend.pii_detector import SUPPORTED_ENTITIES, detect_pii_entities
+from backend.pdf_loader import extract_pdf_text, get_pdf_metadata, is_scanned_pdf
+from backend.redactor import redact_pii, highlight_pii
 from backend.pdf_writer import redact_pdf
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+st.set_page_config(page_title="PDF PII Redactor", layout="wide")
 
-# Set page configuration
-st.set_page_config(
-    page_title="Educational PDF PII Redactor",
-    page_icon="🎓",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Session state
+if 'step' not in st.session_state:
+    st.session_state.step = 1
+if 'detected_entities_dict' not in st.session_state:
+    st.session_state.detected_entities_dict = {}
+if 'pdf_path' not in st.session_state:
+    st.session_state.pdf_path = None
+if 'extracted_text' not in st.session_state:
+    st.session_state.extracted_text = ""
+if 'redaction_type' not in st.session_state:
+    st.session_state.redaction_type = "black_bar"
+if 'custom_mask_text' not in st.session_state:
+    st.session_state.custom_mask_text = "[REDACTED]"
+if 'detection_threshold' not in st.session_state:
+    st.session_state.detection_threshold = 0.2
+if 'selected_pii_types_to_redact' not in st.session_state:
+    st.session_state.selected_pii_types_to_redact = []
 
-# Custom CSS (fixed invalid color)
-st.markdown("""
-<style>
-    .main .block-container {padding-top: 1.5rem;}
-    h1 {margin-bottom: 1rem; color: #1E3A8A; font-size: 2.2rem;}
-    h2 {color: #1E3A8A; font-size: 1.5rem;}
-    .stRadio > div {flex-direction: row;}
-    .stRadio > div > label {margin-right: 1.5rem; font-size: 0.9rem;}
-    .pii-options {
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        gap: 5px;
-        font-size: 0.85rem;
-    }
-    .stCheckbox label p {font-size: 0.85rem !important;}
-    .stButton button {background-color: #1E3A8A; color: white;}
-    .stButton button:hover {background-color: #2563EB;}
-    .footer {font-size: 0.8rem; color: #6B7280; text-align: center; margin-top: 2rem;}
-    .info-box {
-        background-color: #F3F4F6;
-        padding: 1rem;
-        border-radius: 5px;
-        margin-bottom: 1rem;
-    }
-    .stTabs [data-baseweb="tab-list"] {gap: 2px;}
-    .stTabs [data-baseweb="tab"] {
-        height: 40px;
-        white-space: pre-wrap;
-        background-color: #F3F4F6;
-        border-radius: 4px 4px 0 0;
-        gap: 1px;
-        padding-top: 8px;
-        padding-bottom: 8px;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #1E3A8A;
-        color: white;
-    }
-    .redaction-methods {
-        display: flex;
-        flex-direction: column;
-        gap: 5px;
-    }
-    .redaction-method {
-        display: flex;
-        align-items: center;
-        padding: 8px;
-        border: 1px solid #E5E7EB;
-        border-radius: 4px;
-        cursor: pointer;
-    }
-    .redaction-method.selected {
-        border-color: #1E3A8A;
-        background-color: #EFF6FF;
-    }
-    .redaction-method-icon {
-        margin-right: 10px;
-        font-size: 1.2rem;
-    }
-    .redaction-method-text {
-        flex: 1;
-    }
-    .redaction-method-desc {
-        font-size: 0.8rem;
-        color: #6B7280;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Title and description
-st.title("Educational Document PII Redactor")
-st.markdown("Securely redact personally identifiable information from educational documents and records.")
-
-# Sidebar for configuration
 with st.sidebar:
-    st.header("Redaction Settings")
-    
-    st.subheader("Select PII Types to Redact")
-    select_all = st.checkbox("Select All PII Types", value=True, key="select_all")
-    
-    st.markdown('<div class="pii-options">', unsafe_allow_html=True)
-    
-    selected_entities = []
-    for entity_info in CUSTOM_PII_ENTITY_TEMPLATE:
-        if st.checkbox(
-            f"{entity_info['label']} - {entity_info['description']}",
-            value=select_all,
-            key=f"entity_{entity_info['label']}"
-        ):
-            selected_entities.append(entity_info['label'])
-    
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    if not selected_entities:
-        st.error("Please select at least one PII type to redact.")
-    
-    st.subheader("Redaction Method")
-    redaction_options = [
-        {"id": "black_bar", "name": "Black Bar", "icon": "⬛", "desc": "Cover with black rectangles"},
-        {"id": "white_bar", "name": "White Bar", "icon": "⬜", "desc": "Cover with white space"},
-        {"id": "random", "name": "Random Values", "icon": "🔄", "desc": "Replace with fake data"},
-        {"id": "masked", "name": "Masked", "icon": "***", "desc": "Replace with asterisks"},
-        {"id": "custom", "name": "Custom Text", "icon": "✏️", "desc": "Replace with your text"}
-    ]
-    
-    redaction_type = st.radio(
-        "Select how to redact PII:",
-        options=[opt["id"] for opt in redaction_options],
-        format_func=lambda x: next((opt["name"] for opt in redaction_options if opt["id"] == x), x),
-        key="redaction_type_radio",
-        horizontal=False
+    st.header("Settings")
+    st.session_state.detection_threshold = st.slider(
+        "Detection sensitivity:",
+        0.1, 0.9, st.session_state.detection_threshold,
+        help="Lower values detect more potential PII but may increase false positives",
+        key="detection_threshold_slider_key"
     )
-    
-    custom_mask_text = None
-    if redaction_type == "custom":
-        custom_mask_text = st.text_input(
-            "Enter custom text to replace PII:",
-            value="[REDACTED]",
-            key="custom_mask_text"
+    if st.session_state.step == 2:
+        redaction_options = [
+            {"id": "black_bar", "name": "Black Bar", "icon": "⬛"},
+            {"id": "white_bar", "name": "White Bar", "icon": "⬜"},
+            {"id": "random", "name": "Random Values", "icon": "🔄"},
+            {"id": "masked", "name": "Masked", "icon": "***"},
+            {"id": "numbered", "name": "Numbered", "icon": "🔢"},
+            {"id": "custom", "name": "Custom Text", "icon": "✏️"},
+            {"id": "partial", "name": "Partial (Show Last 4 Digits)", "icon": "🔒"}
+        ]
+        redaction_type = st.radio(
+            "Redaction method:",
+            options=[opt["id"] for opt in redaction_options],
+            format_func=lambda x: next((opt["name"] for opt in redaction_options if opt["id"] == x), x),
+            key="redaction_type_radio_key"
         )
-    
-    with st.expander("Advanced Options"):
-        detection_threshold = st.slider(
-            "Detection Sensitivity:",
-            min_value=0.1,
-            max_value=0.9,
-            value=0.3,
-            step=0.1,
-            help="Lower values detect more PII but may include false positives",
-            key="threshold_slider"
+        st.session_state.redaction_type = redaction_type
+        if redaction_type == "custom":
+            st.session_state.custom_mask_text = st.text_input(
+                "Custom replacement text:",
+                value=st.session_state.custom_mask_text,
+                key="custom_mask_text_input_key"
+            )
+
+st.title("PDF PII Redactor")
+st.markdown("Redact PAN, Aadhaar, Credit Card, and more from digital and scanned PDFs.")
+
+if st.session_state.step == 1:
+    st.header("Step 1: Upload and Detect PII")
+    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+    if uploaded_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            st.session_state.pdf_path = tmp_file.name
+        metadata = get_pdf_metadata(st.session_state.pdf_path)
+        st.write(metadata)
+        st.session_state.extracted_text = extract_pdf_text(st.session_state.pdf_path)
+        st.text_area("Extracted Text", st.session_state.extracted_text[:2000], height=300)
+        if st.button("Detect PII Entities"):
+            entities = detect_pii_entities(
+                st.session_state.extracted_text,
+                threshold=st.session_state.detection_threshold
+            )
+            entity_dict = {}
+            for text, etype, start, end in entities:
+                if etype not in entity_dict:
+                    entity_dict[etype] = []
+                entity_dict[etype].append((text, start, end))
+            st.session_state.detected_entities_dict = entity_dict
+            st.session_state.step = 2
+            st.rerun()
+
+elif st.session_state.step == 2:
+    st.header("Step 2: Select PII to Redact & Preview")
+    selected_types = {}
+    for etype, items in st.session_state.detected_entities_dict.items():
+        selected = st.checkbox(etype, value=True, key=f"chk_{etype}")
+        selected_types[etype] = selected
+    selected_entities = [etype for etype, sel in selected_types.items() if sel]
+    st.session_state.selected_pii_types_to_redact = selected_entities
+    entities_to_redact_for_preview = []
+    for etype in selected_entities:
+        for entity_text, start, end in st.session_state.detected_entities_dict.get(etype, []):
+            if start < 500:
+                entities_to_redact_for_preview.append((entity_text, etype, start, end))
+    sample_text = st.session_state.extracted_text[:500]
+    st.markdown(highlight_pii(sample_text, entities_to_redact_for_preview), unsafe_allow_html=True)
+    redacted_sample, _ = redact_pii(
+        sample_text,
+        redaction_type=st.session_state.redaction_type,
+        selected_entities=selected_entities,
+        threshold=st.session_state.detection_threshold,
+        custom_mask_text=st.session_state.custom_mask_text
+    )
+    st.text_area("Redacted Preview", redacted_sample, height=200)
+    if st.button("Redact PDF and Show Preview"):
+        output_filename = f"redacted_{os.path.basename(st.session_state.pdf_path)}"
+        output_path = os.path.join(tempfile.gettempdir(), output_filename)
+        full_entities_to_redact = []
+        for etype in selected_entities:
+            for text, start, end in st.session_state.detected_entities_dict[etype]:
+                full_entities_to_redact.append((text, etype, start, end))
+        scanned = is_scanned_pdf(st.session_state.pdf_path)
+        success = redact_pdf(
+            st.session_state.pdf_path,
+            output_path,
+            redaction_type=st.session_state.redaction_type,
+            entities_to_redact=full_entities_to_redact,
+            custom_mask_text=st.session_state.custom_mask_text,
+            threshold=st.session_state.detection_threshold,
+            scanned=scanned
         )
-        
-        optimize_size = st.checkbox("Optimize output file size", value=True, key="optimize_size_checkbox")
-
-# Main content area
-uploaded_file = st.file_uploader("Upload an educational document (PDF)", type="pdf", key="pdf_uploader")
-
-if uploaded_file:
-    # Validate file size (e.g., max 50MB)
-    max_file_size_mb = 50
-    if uploaded_file.size > max_file_size_mb * 1024 * 1024:
-        st.error(f"File size exceeds {max_file_size_mb}MB limit.")
-    else:
-        pdf_path = None
-        output_pdf = None
-        try:
-            logger.info(f"Uploading file: {uploaded_file.name}")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-                temp_file.write(uploaded_file.read())
-                pdf_path = temp_file.name
-            
-            metadata = get_pdf_metadata(pdf_path)
-            
-            st.markdown('<div class="info-box">', unsafe_allow_html=True)
-            col1, col2, col3 = st.columns([1, 1, 1])
-            with col1:
-                st.write(f"**Document Name:**  \n{uploaded_file.name}")
-            with col2:
-                st.write(f"**Pages:**  \n{metadata.get('page_count', 'Unknown')}")
-            with col3:
-                st.write(f"**Size:**  \n{metadata.get('file_size', 0) / 1024:.1f} KB")
-            st.markdown('</div>', unsafe_allow_html=True)
-            
-            tab1, tab2 = st.tabs(["📝 Preview", "🔒 Redact & Download"])
-            
-            with tab1:
-                st.subheader("Document Preview")
-                
-                if not selected_entities:
-                    st.error("Please select at least one PII type in the sidebar.")
-                else:
-                    with st.spinner("Extracting text from document..."):
-                        status_code, text, ocr_text_pages = extract_pdf_text(pdf_path)
-                    
-                    if status_code == 0:
-                        st.error(
-                            "Failed to extract text from the document. "
-                            "If this is a scanned PDF, ensure Poppler is installed and POPPLER_PATH is set. "
-                            "See https://github.com/oschwartz10612/poppler-windows for installation."
-                        )
-                    else:
-                        if ocr_text_pages:
-                            st.warning("This appears to be a scanned PDF. Text was extracted using OCR.")
-                        
-                        st.write("**Original Text Sample:**")
-                        st.text_area("", value=text[:1000] + ("..." if len(text) > 1000 else ""), height=150, key="original_text_area")
-                        
-                        if st.button("Generate Redacted Preview", key="preview_button"):
-                            with st.spinner("Detecting and redacting PII..."):
-                                redacted_text, detected_pii_types = redact_pii(
-                                    text,
-                                    redaction_type=redaction_type,
-                                    selected_entities=selected_entities,
-                                    threshold=detection_threshold,
-                                    custom_mask_text=custom_mask_text
-                                )
-                            
-                            st.write("**Redacted Text Sample:**")
-                            st.text_area("", value=redacted_text[:1000] + ("..." if len(redacted_text) > 1000 else ""), height=150, key="redacted_text_area")
-                            
-                            if detected_pii_types:
-                                st.success(f"Detected PII types: {', '.join(detected_pii_types)}")
-                                
-                                pii_counts = {}
-                                for pii_type in detected_pii_types:
-                                    pii_counts[pii_type] = pii_counts.get(pii_type, 0) + 1
-                                
-                                st.write("**PII Detection Summary:**")
-                                for pii_type, count in pii_counts.items():
-                                    st.write(f"- {pii_type}: {count} instance(s)")
-                            else:
-                                st.info("No PII detected in the document.")
-            
-            with tab2:
-                st.subheader("Redact Document")
-                
-                col1, col2 = st.columns([2, 1])
-                
-                with col1:
-                    st.write("Click the button below to redact the PDF and download the result.")
-                    
-                    if st.button("Redact PDF", type="primary", key="redact_button"):
-                        if not selected_entities:
-                            st.error("Please select at least one PII type in the sidebar.")
-                        else:
-                            progress_bar = st.progress(0)
-                            status_text = st.empty()
-                            
-                            status_text.text("Starting redaction process...")
-                            progress_bar.progress(10)
-                            
-                            output_pdf = pdf_path.replace(".pdf", "_redacted.pdf")
-                            
-                            status_text.text("Detecting PII entities...")
-                            progress_bar.progress(30)
-                            
-                            success = redact_pdf(
-                                pdf_path,
-                                output_pdf,
-                                redaction_type=redaction_type,
-                                selected_entities=selected_entities,
-                                threshold=detection_threshold,
-                                custom_mask_text=custom_mask_text,
-                                ocr_text_pages=ocr_text_pages
-                            )
-                            
-                            progress_bar.progress(80)
-                            status_text.text("Finalizing redacted document...")
-                            
-                            if success:
-                                with open(output_pdf, "rb") as f:
-                                    redacted_pdf_data = f.read()
-                                
-                                progress_bar.progress(100)
-                                status_text.text("Redaction complete!")
-                                
-                                st.success("PDF redacted successfully!")
-                                st.download_button(
-                                    label="Download Redacted PDF",
-                                    data=redacted_pdf_data,
-                                    file_name=f"redacted_{uploaded_file.name}",
-                                    mime="application/pdf",
-                                    key="download_button"
-                                )
-                                
-                                original_size = os.path.getsize(pdf_path)
-                                redacted_size = os.path.getsize(output_pdf)
-                                
-                                st.info(f"Original file size: {original_size/1024:.1f} KB\nRedacted file size: {redacted_size/1024:.1f} KB")
-                            else:
-                                progress_bar.progress(100)
-                                status_text.text("Redaction failed or no PII found.")
-                                st.warning(
-                                    "No PII was detected or redaction process failed. "
-                                    "Try adjusting the detection sensitivity or selecting different PII types."
-                                )
-                
-                with col2:
-                    st.write("**Redaction Type:**")
-                    redaction_examples = {
-                        "black_bar": "John Doe → █████████",
-                        "white_bar": "John Doe → [blank space]",
-                        "random": "John Doe → Jane Smith",
-                        "masked": "John Doe → *********",
-                        "custom": f"John Doe → {custom_mask_text if custom_mask_text else '[REDACTED]'}"
-                    }
-                    st.code(redaction_examples[redaction_type])
-                    
-                    st.write("**Selected PII Types:**")
-                    if selected_entities:
-                        st.code("\n".join(selected_entities))
-                    else:
-                        st.warning("No PII types selected")
-        
-        finally:
-            # Ensure temporary files are cleaned up
-            if pdf_path and os.path.exists(pdf_path):
-                try:
-                    os.remove(pdf_path)
-                    logger.info(f"Cleaned up temporary file: {pdf_path}")
-                except Exception as e:
-                    logger.error(f"Failed to clean up {pdf_path}: {e}")
-            if output_pdf and os.path.exists(output_pdf):
-                try:
-                    os.remove(output_pdf)
-                    logger.info(f"Cleaned up temporary file: {output_pdf}")
-                except Exception as e:
-                    logger.error(f"Failed to clean up {output_pdf}: {e}")
-
-# Footer
-st.markdown('<div class="footer">', unsafe_allow_html=True)
-st.markdown("Educational PDF PII Redactor - Securely redact sensitive information from educational documents")
-st.markdown("</div>", unsafe_allow_html=True)
+        if success:
+            with open(output_path, "rb") as f:
+                pdf_bytes = f.read()
+            st.success("PDF successfully redacted!")
+            pdf_viewer(pdf_bytes, width=900, height=800)
+            st.download_button(
+                label="Download Redacted PDF",
+                data=pdf_bytes,
+                file_name=output_filename,
+                mime="application/pdf"
+            )
+        else:
+            st.error("Failed to redact PDF. Please try again.")
+    if st.button("Back to Upload/Detection"):
+        st.session_state.step = 1
+        st.session_state.detected_entities_dict = {}
+        st.session_state.selected_pii_types_to_redact = []
+        st.rerun()
