@@ -1,198 +1,200 @@
-from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern, RecognizerRegistry, EntityRecognizer, RecognizerResult
-from presidio_analyzer.predefined_recognizers import (
-    CreditCardRecognizer, PhoneRecognizer, EmailRecognizer, IbanRecognizer,
-    IpRecognizer, MedicalLicenseRecognizer, UrlRecognizer, UsSsnRecognizer,
-    UsBankRecognizer, UsLicenseRecognizer, UsItinRecognizer, UsPassportRecognizer,
-    NhsRecognizer, UkNinoRecognizer, SgFinRecognizer, AuAbnRecognizer,
-    AuAcnRecognizer, AuTfnRecognizer, AuMedicareRecognizer, InPanRecognizer,
-    InAadhaarRecognizer, InVehicleRegistrationRecognizer, InPassportRecognizer,
-    InVoterRecognizer, CryptoRecognizer, DateRecognizer, SpacyRecognizer
-)
-import re
-import json
 import logging
-import os
 import spacy
-import time
+from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+from presidio_analyzer.pattern_recognizer import PatternRecognizer
+
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Suppress Presidio and Faker debug logs
-logging.getLogger("presidio-analyzer").setLevel(logging.INFO)
-logging.getLogger("faker.factory").setLevel(logging.INFO)
+# Customized PII entity template for educational field
+# IMPORTANT: This is the variable name that needs to be consistent with imports
+CUSTOM_PII_ENTITY_TEMPLATE = [
+    {"label": "PERSON", "description": "Names of individuals"},
+    {"label": "PHONE_NUMBER", "description": "Phone numbers"},
+    {"label": "DATE_TIME", "description": "Dates and times"},
+    {"label": "EMAIL_ADDRESS", "description": "Email addresses"},
+    {"label": "SCHOOL", "description": "School or institution names"},
+    {"label": "AADHAAR", "description": "Indian Aadhaar numbers"},
+    {"label": "PAN", "description": "Indian PAN numbers"},
+    {"label": "CREDIT_CARD", "description": "Credit card numbers"}
+]
 
-# Config path
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-if not os.path.exists(CONFIG_PATH):
-    logger.error(f"Config file '{CONFIG_PATH}' not found.")
-    raise FileNotFoundError(f"Config file '{CONFIG_PATH}' not found.")
+# Cache the analyzer instance for better performance
+_analyzer_instance = None
 
-# PII detection cache
-pii_cache = {}
-
-# Initialize Presidio
-try:
-    logger.info("Initializing Presidio Analyzer...")
-    registry = RecognizerRegistry()
+def create_custom_recognizers():
+    """Create custom recognizers for educational field PII types"""
+    recognizers = []
     
-    # Manually add English-compatible predefined recognizers
-    supported_languages = ["en"]
-    english_recognizers = [
-        CreditCardRecognizer(supported_language="en"),
-        PhoneRecognizer(supported_language="en"),
-        EmailRecognizer(supported_language="en"),
-        IbanRecognizer(supported_language="en"),
-        IpRecognizer(supported_language="en"),
-        MedicalLicenseRecognizer(supported_language="en"),
-        UrlRecognizer(supported_language="en"),
-        UsSsnRecognizer(supported_language="en"),
-        UsBankRecognizer(supported_language="en"),
-        UsLicenseRecognizer(supported_language="en"),
-        UsItinRecognizer(supported_language="en"),
-        UsPassportRecognizer(supported_language="en"),
-        NhsRecognizer(supported_language="en"),
-        UkNinoRecognizer(supported_language="en"),
-        SgFinRecognizer(supported_language="en"),
-        AuAbnRecognizer(supported_language="en"),
-        AuAcnRecognizer(supported_language="en"),
-        AuTfnRecognizer(supported_language="en"),
-        AuMedicareRecognizer(supported_language="en"),
-        InPanRecognizer(supported_language="en"),
-        InAadhaarRecognizer(supported_language="en"),
-        InVehicleRegistrationRecognizer(supported_language="en"),
-        InPassportRecognizer(supported_language="en"),
-        InVoterRecognizer(supported_language="en"),
-        CryptoRecognizer(supported_language="en"),
-        DateRecognizer(supported_language="en"),
-        SpacyRecognizer(supported_language="en")
-    ]
-    for recognizer in english_recognizers:
-        try:
-            registry.add_recognizer(recognizer)
-        except Exception as e:
-            logger.warning(f"Failed to add recognizer {recognizer.name}: {e}")
-
-    # Custom recognizers
-    aadhaar_pattern = Pattern(name="AADHAAR_PATTERN", regex=r'\b\d{4}\s*\-?\s*\d{4}\s*\-?\s*\d{4}\b', score=0.85)
-    ssn_pattern = Pattern(name="SSN_PATTERN", regex=r'\b\d{3}\s*\-?\s*\d{2}\s*\-?\s*\d{4}\b', score=0.85)
-    custom_id_pattern = Pattern(name="CUSTOM_ID_PATTERN", regex=r'\b[A-Z0-9]{0,2}\d{6,11}\b', score=0.85)
-    pan_pattern = Pattern(name="PAN_PATTERN", regex=r'\b[A-Z]{5}\d{4}[A-Z]\b', score=0.85)
-    credit_card_pattern = Pattern(name="CREDIT_CARD_PATTERN", regex=r'\b(?:\d{4}\s*\-?\s*){3}\d{4}\b', score=0.7)
+    # School/Institution recognizer
+    school_recognizer = PatternRecognizer(
+        supported_entity="SCHOOL",
+        patterns=[
+            {"name": "school_name", "regex": r"\b[A-Z][a-zA-Z\s]+ (?:School|College|University|Institute)\b", "score": 0.7},
+            {"name": "school_abbr", "regex": r"\b[A-Z]{2,5}\b(?=\s+(?:University|College|School|Institute))", "score": 0.7}
+        ]
+    )
     
-    aadhaar_recognizer = PatternRecognizer(supported_entity="AADHAAR", patterns=[aadhaar_pattern], supported_language="en")
-    ssn_recognizer = PatternRecognizer(supported_entity="SSN", patterns=[ssn_pattern], supported_language="en")
-    custom_id_recognizer = PatternRecognizer(supported_entity="CUSTOM_ID", patterns=[custom_id_pattern], supported_language="en")
-    pan_recognizer = PatternRecognizer(supported_entity="PAN", patterns=[pan_pattern], supported_language="en")
-    credit_card_recognizer = PatternRecognizer(supported_entity="CREDIT_CARD", patterns=[credit_card_pattern], supported_language="en")
+    # Aadhaar recognizer
+    aadhaar_recognizer = PatternRecognizer(
+        supported_entity="AADHAAR",
+        patterns=[
+            {"name": "aadhaar_with_spaces", "regex": r"\b\d{4}\s\d{4}\s\d{4}\b", "score": 0.8},
+            {"name": "aadhaar_no_spaces", "regex": r"\b\d{12}\b", "score": 0.6}
+        ]
+    )
     
-    registry.add_recognizer(aadhaar_recognizer)
-    registry.add_recognizer(ssn_recognizer)
-    registry.add_recognizer(custom_id_recognizer)
-    registry.add_recognizer(pan_recognizer)
-    registry.add_recognizer(credit_card_recognizer)
+    # PAN recognizer
+    pan_recognizer = PatternRecognizer(
+        supported_entity="PAN",
+        patterns=[
+            {"name": "pan", "regex": r"\b[A-Z]{5}[0-9]{4}[A-Z]\b", "score": 0.8}
+        ]
+    )
     
-    class CustomSpacyRecognizer(EntityRecognizer):
-        def __init__(self):
-            super().__init__(
-                supported_entities=["ADDRESS", "ORGANIZATION", "LOCATION", "PERSON"],
-                supported_language="en",
-                name="CustomSpacyRecognizer"
-            )
-            try:
-                self.nlp = spacy.load("en_core_web_lg")
-            except:
-                logger.warning("en_core_web_lg not found, using en_core_web_sm")
-                self.nlp = spacy.load("en_core_web_sm")
-        
-        def analyze(self, text, entities, nlp_artifacts=None):
-            try:
-                doc = self.nlp(text)
-                results = []
-                for ent in doc.ents:
-                    if ent.label_ in entities:
-                        results.append(RecognizerResult(
-                            entity_type=ent.label_,
-                            start=ent.start_char,
-                            end=ent.end_char,
-                            score=0.75
-                        ))
-                return results
-            except Exception as e:
-                logger.error(f"CustomSpacyRecognizer failed: {e}")
-                return []
+    # Enhanced person recognizer (to supplement built-in)
+    person_recognizer = PatternRecognizer(
+        supported_entity="PERSON",
+        patterns=[
+            {"name": "full_name", "regex": r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b", "score": 0.85}
+        ]
+    )
     
-    registry.add_recognizer(CustomSpacyRecognizer())
-    analyzer = AnalyzerEngine(registry=registry, supported_languages=supported_languages)
-    logger.info("Presidio Analyzer initialized with support for languages: %s", supported_languages)
-except Exception as e:
-    logger.error(f"Failed to initialize Presidio: %s", e)
-    raise RuntimeError(f"[Error] Failed to initialize Presidio: %s", e)
+    # Enhanced phone recognizer
+    phone_recognizer = PatternRecognizer(
+        supported_entity="PHONE_NUMBER",
+        patterns=[
+            {"name": "us_phone", "regex": r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b", "score": 0.85},
+            {"name": "india_phone", "regex": r"\b(?:\+91|0)?[789]\d{9}\b", "score": 0.85}
+        ]
+    )
+    
+    # Enhanced email recognizer
+    email_recognizer = PatternRecognizer(
+        supported_entity="EMAIL_ADDRESS",
+        patterns=[
+            {"name": "email", "regex": r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b", "score": 0.85}
+        ]
+    )
+    
+    recognizers.extend([
+        school_recognizer,
+        aadhaar_recognizer, 
+        pan_recognizer,
+        person_recognizer,
+        phone_recognizer,
+        email_recognizer
+    ])
+    
+    return recognizers
 
-# Load PII entities
-try:
-    with open(CONFIG_PATH, "r") as f:
-        config = json.load(f)
-    PII_ENTITIES = config["pii_entities"]
-    valid_entities = [
-        "PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", "CREDIT_CARD",
-        "ADDRESS", "ORGANIZATION", "LOCATION", "AADHAAR", "SSN", "CUSTOM_ID", "PAN"
-    ]
-    for entity in PII_ENTITIES:
-        if entity not in valid_entities:
-            logger.warning(f"Unknown PII entity in config: %s", entity)
-except Exception as e:
-    logger.warning(f"Failed to load config: %s", e)
-    PII_ENTITIES = valid_entities
-
-def detect_pii_entities(text):
-    """
-    Detects PII using Presidio and regex, with caching.
-    """
-    if not isinstance(text, str):
-        raise ValueError("[Error] Input text must be a string.")
-    if not text.strip():
-        return []
-
-    # Check cache
-    cache_key = text
-    if cache_key in pii_cache:
-        logger.debug(f"Cache hit for text: '{text[:100]}...'")
-        return pii_cache[cache_key]
-
-    entities = []
-    start_time = time.time()
+def initialize_analyzer():
+    """Initialize the Presidio analyzer with custom configuration"""
     try:
-        logger.debug(f"Running Presidio PII detection on: '{text[:100]}...'")
-        results = analyzer.analyze(text=text, entities=[e for e in PII_ENTITIES if e in valid_entities], language="en")
-        for result in results:
-            if result.score >= 0.6:
-                entity_text = text[result.start:result.end]
-                entities.append((entity_text, result.entity_type, result.start, result.end))
-        logger.debug(f"Presidio detection took {time.time() - start_time:.2f} seconds")
+        # Create NLP engine with spaCy model
+        provider = NlpEngineProvider(nlp_configuration={"lang_code": "en", "model_name": "en_core_web_lg"})
+        nlp_engine = provider.create_engine()
+        
+        # Create registry and load predefined recognizers
+        registry = RecognizerRegistry()
+        registry.load_predefined_recognizers(nlp_engine=nlp_engine)
+        
+        # Add custom recognizers
+        for recognizer in create_custom_recognizers():
+            registry.add_recognizer(recognizer)
+        
+        # Create analyzer with the registry
+        analyzer = AnalyzerEngine(registry=registry, nlp_engine=nlp_engine)
+        logger.info("Presidio Analyzer initialized successfully")
+        return analyzer
     except Exception as e:
-        logger.error(f"Presidio analysis failed: %s", e)
+        logger.error(f"Error initializing Presidio Analyzer: {str(e)}")
+        raise
 
+def get_analyzer():
+    """Get or create a cached analyzer instance"""
+    global _analyzer_instance
+    if _analyzer_instance is None:
+        _analyzer_instance = initialize_analyzer()
+    return _analyzer_instance
+
+def detect_pii_entities(text, threshold=0.3, selected_entities=None):
+    """
+    Detect PII entities in the given text using Presidio.
+    
+    Args:
+        text (str): The text to analyze
+        threshold (float): Confidence threshold for entity detection (0.0-1.0)
+        selected_entities (list): Optional list of entity types to detect
+        
+    Returns:
+        list: List of tuples (entity_text, entity_type, start_index, end_index)
+    """
+    if not text or not isinstance(text, str):
+        return []
+    
+    try:
+        # Get analyzer
+        analyzer = get_analyzer()
+        
+        # Analyze text with Presidio
+        results = analyzer.analyze(
+            text=text, 
+            language='en',
+            entities=selected_entities,
+            score_threshold=threshold
+        )
+        
+        # Convert results to our format
+        entities = []
+        for result in results:
+            entity_text = text[result.start:result.end]
+            entities.append((
+                entity_text,
+                result.entity_type,
+                result.start,
+                result.end
+            ))
+        
+        # If no entities found with Presidio, use fallback regex detection
+        if not entities:
+            entities = fallback_regex_detection(text, selected_entities)
+        
+        logger.info(f"Detected {len(entities)} PII entities with threshold {threshold}")
+        for entity in entities:
+            logger.info(f"Found {entity[1]}: '{entity[0]}'")
+        
+        return entities
+    except Exception as e:
+        logger.error(f"Error detecting PII entities: {str(e)}")
+        # Use fallback regex detection if Presidio fails
+        return fallback_regex_detection(text, selected_entities)
+
+def fallback_regex_detection(text, selected_entities=None):
+    """Fallback regex-based detection when Presidio fails"""
+    import re
+    entities = []
+    
     patterns = {
-        "AADHAAR": r'\b\d{4}\s*\-?\s*\d{4}\s*\-?\s*\d{4}\b',
-        "SSN": r'\b\d{3}\s*\-?\s*\d{2}\s*\-?\s*\d{4}\b',
-        "CUSTOM_ID": r'\b[A-Z0-9]{0,2}\d{6,11}\b',
-        "PAN": r'\b[A-Z]{5}\d{4}[A-Z]\b',
-        "CREDIT_CARD": r'\b(?:\d{4}\s*\-?\s*){3}\d{4}\b'
+        "PERSON": r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b',
+        "PHONE_NUMBER": r'\b(?:\+91|0)?[789]\d{9}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b',
+        "EMAIL_ADDRESS": r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b',
+        "CREDIT_CARD": r'\b(?:\d{4}[-\s]?){4}\b',
+        "SCHOOL": r'\b[A-Z][a-zA-Z\s]+ (?:School|College|University|Institute)\b',
+        "AADHAAR": r'\b\d{4}\s\d{4}\s\d{4}\b|\b\d{12}\b',
+        "PAN": r'\b[A-Z]{5}[0-9]{4}[A-Z]\b',
+        "DATE_TIME": r'\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4}\b'
     }
-    for label, pattern in patterns.items():
+    
+    # Filter patterns based on selected entities
+    if selected_entities:
+        patterns = {k: v for k, v in patterns.items() if k in selected_entities}
+    
+    for entity_type, pattern in patterns.items():
         for match in re.finditer(pattern, text):
-            entities.append((match.group(), label, match.start(), match.end()))
-
-    unique_entities = list({(text, label, start, end): (text, label, start, end) 
-                           for text, label, start, end in entities}.values())
-    unique_entities.sort(key=lambda x: x[2])
-    logger.debug(f"Final entities: {unique_entities}")
+            entities.append((match.group(), entity_type, match.start(), match.end()))
     
-    # Cache result
-    pii_cache[cache_key] = unique_entities
-    if len(pii_cache) > 1000:
-        pii_cache.pop(next(iter(pii_cache)))
-    
-    return unique_entities
+    return entities
