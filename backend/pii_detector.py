@@ -4,13 +4,11 @@ from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_analyzer.pattern_recognizer import PatternRecognizer
 
-
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Customized PII entity template for educational field
-# IMPORTANT: This is the variable name that needs to be consistent with imports
 CUSTOM_PII_ENTITY_TEMPLATE = [
     {"label": "PERSON", "description": "Names of individuals"},
     {"label": "PHONE_NUMBER", "description": "Phone numbers"},
@@ -55,11 +53,11 @@ def create_custom_recognizers():
         ]
     )
     
-    # Enhanced person recognizer (to supplement built-in)
+    # Enhanced person recognizer (more specific to avoid false positives)
     person_recognizer = PatternRecognizer(
         supported_entity="PERSON",
         patterns=[
-            {"name": "full_name", "regex": r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b", "score": 0.85}
+            {"name": "full_name", "regex": r"\b[A-Z][a-z]{1,15}\s+[A-Z][a-z]{1,15}\b", "score": 0.85}
         ]
     )
     
@@ -82,7 +80,7 @@ def create_custom_recognizers():
     
     recognizers.extend([
         school_recognizer,
-        aadhaar_recognizer, 
+        aadhaar_recognizer,
         pan_recognizer,
         person_recognizer,
         phone_recognizer,
@@ -94,6 +92,11 @@ def create_custom_recognizers():
 def initialize_analyzer():
     """Initialize the Presidio analyzer with custom configuration"""
     try:
+        # Validate spaCy model
+        if not spacy.util.is_package("en_core_web_lg"):
+            logger.error("spaCy model 'en_core_web_lg' not found. Install with: python -m spacy download en_core_web_lg")
+            raise RuntimeError("Missing spaCy model 'en_core_web_lg'")
+        
         # Create NLP engine with spaCy model
         provider = NlpEngineProvider(nlp_configuration={"lang_code": "en", "model_name": "en_core_web_lg"})
         nlp_engine = provider.create_engine()
@@ -134,6 +137,7 @@ def detect_pii_entities(text, threshold=0.3, selected_entities=None):
         list: List of tuples (entity_text, entity_type, start_index, end_index)
     """
     if not text or not isinstance(text, str):
+        logger.warning("No valid text provided for PII detection")
         return []
     
     try:
@@ -142,7 +146,7 @@ def detect_pii_entities(text, threshold=0.3, selected_entities=None):
         
         # Analyze text with Presidio
         results = analyzer.analyze(
-            text=text, 
+            text=text,
             language='en',
             entities=selected_entities,
             score_threshold=threshold
@@ -179,7 +183,7 @@ def fallback_regex_detection(text, selected_entities=None):
     entities = []
     
     patterns = {
-        "PERSON": r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b',
+        "PERSON": r'\b[A-Z][a-z]{1,15}\s+[A-Z][a-z]{1,15}\b',
         "PHONE_NUMBER": r'\b(?:\+91|0)?[789]\d{9}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b',
         "EMAIL_ADDRESS": r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b',
         "CREDIT_CARD": r'\b(?:\d{4}[-\s]?){4}\b',

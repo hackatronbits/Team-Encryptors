@@ -1,236 +1,197 @@
 import fitz  # PyMuPDF
-from backend.pii_detector import detect_pii_entities
-from backend.redactor import generate_fake_data
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.pdfbase import pdfmetrics
 import os
 import logging
+from backend.redactor import generate_fake_data, mask_text
+from backend.pii_detector import detect_pii_entities
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Font path
-FONT_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "DejaVuSans.ttf")
-font_name = "helv"
-try:
-    if os.path.exists(FONT_PATH):
-        pdfmetrics.registerFont(TTFont("DejaVuSans", FONT_PATH))
-        font_name = "DejaVuSans"
-        logger.info("DejaVuSans font registered for reportlab.")
-    else:
-        logger.warning(f"Font file {FONT_PATH} not found. Using default font.")
-except Exception as e:
-    logger.warning(f"Failed to register DejaVuSans font: %s", e)
-    font_name = "helv"
-
-def merge_spans(spans):
+def draw_redaction(page, rect, redaction_type, text=None, font_size=11, custom_mask_text=None):
     """
-    Merge adjacent text spans to prevent PII splitting.
-    """
-    if not spans:
-        return []
+    Draw redaction on a PDF page.
     
-    merged = []
-    current_text = spans[0]["text"]
-    current_bbox = list(spans[0]["bbox"])
-    current_size = spans[0]["size"]
-    
-    for span in spans[1:]:
-        if (span["bbox"][1] == current_bbox[1] and
-            abs(span["bbox"][0] - current_bbox[2]) < 5):
-            current_text += " " + span["text"]
-            current_bbox[2] = span["bbox"][2]
-            current_size = min(current_size, span["size"])
-        else:
-            merged.append({
-                "text": current_text,
-                "bbox": current_bbox,
-                "size": current_size
-            })
-            current_text = span["text"]
-            current_bbox = list(span["bbox"])
-            current_size = span["size"]
-    
-    merged.append({
-        "text": current_text,
-        "bbox": current_bbox,
-        "size": current_size
-    })
-    return merged
-
-def redact_pdf(input_path, output_path, ocr_data=None):
-    """
-    Redacts PII in the PDF while preserving layout.
+    Args:
+        page: PyMuPDF page object
+        rect: Rectangle coordinates (x0, y0, x1, y1)
+        redaction_type: Type of redaction (black_bar, white_bar, random, masked, custom)
+        text: Text to insert (for random and masked types)
+        font_size: Font size for inserted text
+        custom_mask_text: Custom text to use for masking
     """
     try:
-        doc = fitz.open(input_path)
-        logger.info("PDF opened successfully.")
+        # Dynamically adjust font size based on rectangle height
+        adjusted_font_size = min(font_size, rect.height * 0.8)
         
-        pdf_font_name = font_name
-        font_buffer = None
-        if font_name == "DejaVuSans":
-            try:
-                with open(FONT_PATH, "rb") as font_file:
-                    font_buffer = font_file.read()
-                font = fitz.Font(fontbuffer=font_buffer, fontname="DejaVuSans")
-                if not font.is_writable:
-                    raise ValueError("DejaVuSans font is not writable.")
-                logger.info("DejaVuSans font loaded for PyMuPDF.")
-            except Exception as e:
-                logger.error(f"Failed to load DejaVuSans for PyMuPDF: %s. Using helv.", e)
-                pdf_font_name = "helv"
-                font_buffer = None
+        if redaction_type == "black_bar":
+            page.draw_rect(rect, color=(0, 0, 0), fill=(0, 0, 0), overlay=True)
+        elif redaction_type == "white_bar":
+            page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+        elif redaction_type == "custom" and custom_mask_text:
+            page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+            page.insert_text(
+                point=(rect[0], rect[1] + adjusted_font_size/2),
+                text=custom_mask_text,
+                fontsize=adjusted_font_size,
+                color=(0, 0, 0)
+            )
+        elif text and (redaction_type == "random" or redaction_type == "masked"):
+            page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+            page.insert_text(
+                point=(rect[0], rect[1] + adjusted_font_size/2),
+                text=text,
+                fontsize=adjusted_font_size,
+                color=(0, 0, 0)
+            )
+        logger.info(f"Applied {redaction_type} redaction to rectangle {rect}")
+    except Exception as e:
+        logger.error(f"Error applying redaction: {e}")
+
+def find_text_instances(page, text_to_find):
+    """
+    Find all instances of text on a page and return their rectangles.
+    Includes partial and case-insensitive matching as fallback.
+    """
+    try:
+        text_instances = page.search_for(text_to_find)
+        if not text_instances:
+            normalized_text = ' '.join(text_to_find.split())
+            text_instances = page.search_for(normalized_text)
+        if not text_instances:
+            text_instances = page.search_for(text_to_find.lower())
+        if not text_instances:
+            text_instances = page.search_for(text_to_find.upper())
+        if not text_instances:
+            # Partial match as last resort
+            words = text_to_find.split()
+            if words:
+                text_instances = page.search_for(words[0])
+        return text_instances
+    except Exception as e:
+        logger.error(f"Error finding text instances for '{text_to_find}': {e}")
+        return []
+
+def redact_pdf(input_pdf, output_pdf, redaction_type="random", selected_entities=None, threshold=0.3, custom_mask_text=None, ocr_text_pages=None):
+    """
+    Redact PII in a PDF file using Presidio for detection.
+    
+    Args:
+        input_pdf (str): Path to input PDF
+        output_pdf (str): Path to save redacted PDF
+        redaction_type (str): Type of redaction (black_bar, white_bar, random, masked, custom)
+        selected_entities (list): List of entity types to redact
+        threshold (float): Confidence threshold for PII detection
+        custom_mask_text (str): Custom text to use for masking
+        ocr_text_pages (list): OCR data with bounding boxes (for scanned PDFs)
+    
+    Returns:
+        bool: True if redactions were applied, False otherwise
+    """
+    try:
+        # Validate PDF
+        with open(input_pdf, 'rb') as f:
+            if not f.read(8).startswith(b'%PDF-'):
+                logger.error(f"Invalid PDF file: {input_pdf}")
+                return False
         
-        is_scanned = bool(ocr_data)
+        doc = fitz.open(input_pdf)
+        redactions_applied = False
         
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            logger.info(f"Processing page {page_num + 1} of {len(doc)}.")
-            
-            if is_scanned:
-                page_data = next((p for p in ocr_data if p['page'] == page_num + 1), None)
-                if not page_data:
-                    logger.warning(f"No OCR data for page {page_num + 1}.")
+        if ocr_text_pages:
+            # Scanned PDF: Use OCR bounding boxes
+            logger.info("Processing scanned PDF with OCR data")
+            for page_data in ocr_text_pages:
+                page_num = page_data['page'] - 1
+                page = doc.load_page(page_num)
+                page_text = page_data['raw_text']
+                
+                entities = detect_pii_entities(
+                    page_text,
+                    threshold=threshold,
+                    selected_entities=selected_entities
+                )
+                
+                if not entities:
+                    logger.info(f"No entities found on page {page_num+1}")
                     continue
                 
-                for item in page_data['text_data']:
-                    text = item['text']
-                    bbox = (item['left'], item['top'], item['left'] + item['width'], item['top'] + item['height'])
-                    rect = fitz.Rect(bbox)
+                logger.info(f"Found {len(entities)} entities on page {page_num+1}")
+                
+                for entity_text, entity_type, start, end in entities:
+                    # Find matching OCR text segments
+                    for text_data in page_data['text_data']:
+                        if entity_text in text_data['text']:
+                            rect = fitz.Rect(
+                                text_data['left'],
+                                text_data['top'],
+                                text_data['left'] + text_data['width'],
+                                text_data['top'] + text_data['height']
+                            )
+                            replacement = None
+                            if redaction_type == "random":
+                                replacement = generate_fake_data(entity_type, entity_text)
+                                if len(replacement) > len(entity_text):
+                                    replacement = replacement[:len(entity_text)]
+                            elif redaction_type == "masked":
+                                replacement = mask_text(entity_text)
+                            elif redaction_type == "custom":
+                                replacement = custom_mask_text
+                            
+                            draw_redaction(page, rect, redaction_type, text=replacement, custom_mask_text=custom_mask_text)
+                            logger.info(f"Redacted '{entity_text}' ({entity_type}) on page {page_num+1}")
+                            redactions_applied = True
+        else:
+            # Text-based PDF: Use text search
+            for page_num in range(len(doc)):
+                logger.info(f"Processing page {page_num+1}/{len(doc)}")
+                page = doc.load_page(page_num)
+                page_text = page.get_text()
+                
+                entities = detect_pii_entities(
+                    page_text,
+                    threshold=threshold,
+                    selected_entities=selected_entities
+                )
+                
+                if not entities:
+                    logger.info(f"No entities found on page {page_num+1}")
+                    continue
+                
+                logger.info(f"Found {len(entities)} entities on page {page_num+1}")
+                
+                for entity_text, entity_type, start, end in entities:
+                    text_instances = find_text_instances(page, entity_text)
                     
-                    entities = detect_pii_entities(text)
-                    if not entities:
+                    if not text_instances:
+                        logger.warning(f"Could not find text '{entity_text}' on page {page_num+1}")
                         continue
                     
-                    page.draw_rect(rect, fill=(1, 1, 1), overlay=True)
+                    replacement = None
+                    if redaction_type == "random":
+                        replacement = generate_fake_data(entity_type, entity_text)
+                        if len(replacement) > len(entity_text):
+                            replacement = replacement[:len(entity_text)]
+                    elif redaction_type == "masked":
+                        replacement = mask_text(entity_text)
+                    elif redaction_type == "custom":
+                        replacement = custom_mask_text
                     
-                    font_size = max(6, min(12, item['height'] * 0.6))
-                    logger.debug(f"Scanned: Font size {font_size}, bbox {bbox} for text: '{text}'")
-                    
-                    redacted_text = text
-                    for entity_text, label, _, _ in entities:
-                        fake_text = generate_fake_data(label, len(entity_text))
-                        redacted_text = redacted_text.replace(entity_text, fake_text)
-                        logger.debug(f"Scanned: Replacing '{entity_text}' with '{fake_text}'")
-                    
-                    for attempt in range(3):
-                        try:
-                            logger.debug(f"Attempt {attempt + 1} to insert '{redacted_text}' with font {pdf_font_name}")
-                            if pdf_font_name == "DejaVuSans" and font_buffer:
-                                page.insert_textbox(
-                                    rect,
-                                    redacted_text,
-                                    fontfile=FONT_PATH,
-                                    fontsize=font_size,
-                                    color=(0, 0, 0),
-                                    align=0,
-                                    overlay=True
-                                )
-                            else:
-                                page.insert_textbox(
-                                    rect,
-                                    redacted_text,
-                                    fontname="helv",
-                                    fontsize=font_size,
-                                    color=(0, 0, 0),
-                                    align=0,
-                                    overlay=True
-                                )
-                            logger.info(f"Inserted redacted text '{redacted_text}' on page {page_num + 1}")
-                            break
-                        except Exception as e:
-                            logger.error(f"Text insertion attempt {attempt + 1} failed: %s", e)
-                            if attempt < 2:
-                                font_size *= 0.8
-                                rect = fitz.Rect(bbox[0], bbox[1] - 2, bbox[2], bbox[3] + 2)
-                                logger.warning(f"Retrying with font size {font_size}, adjusted bbox {rect}")
-                            else:
-                                logger.error(f"Final insertion failed, using REDACTED: %s", e)
-                                page.insert_textbox(
-                                    rect,
-                                    "REDACTED",
-                                    fontname="helv",
-                                    fontsize=font_size,
-                                    color=(0, 0, 0),
-                                    align=0,
-                                    overlay=True
-                                )
-            else:
-                blocks = page.get_text("dict")["blocks"]
-                for block in blocks:
-                    if "lines" not in block:
-                        continue
-                    
-                    for line in block["lines"]:
-                        merged_spans = merge_spans(line["spans"])
-                        for span in merged_spans:
-                            original_text = span["text"]
-                            if not original_text.strip():
-                                continue
-                            
-                            entities = detect_pii_entities(original_text)
-                            if not entities:
-                                continue
-                            
-                            rect = fitz.Rect(span["bbox"])
-                            page.draw_rect(rect, fill=(1, 1, 1), overlay=True)
-                            
-                            font_size = max(6, min(12, span["size"] * 0.8))
-                            logger.debug(f"Digital: Font size {font_size}, bbox {rect} for text: '{original_text}'")
-                            
-                            redacted_text = original_text
-                            for entity_text, label, _, _ in entities:
-                                fake_text = generate_fake_data(label, len(entity_text))
-                                redacted_text = redacted_text.replace(entity_text, fake_text)
-                                logger.debug(f"Digital: Replacing '{entity_text}' with '{fake_text}'")
-                            
-                            for attempt in range(3):
-                                try:
-                                    logger.debug(f"Attempt {attempt + 1} to insert '{redacted_text}' with font {pdf_font_name}")
-                                    if pdf_font_name == "DejaVuSans" and font_buffer:
-                                        page.insert_textbox(
-                                            rect,
-                                            redacted_text,
-                                            fontfile=FONT_PATH,
-                                            fontsize=font_size,
-                                            color=(0, 0, 0),
-                                            align=0,
-                                            overlay=True
-                                        )
-                                    else:
-                                        page.insert_textbox(
-                                            rect,
-                                            redacted_text,
-                                            fontname="helv",
-                                            fontsize=font_size,
-                                            color=(0, 0, 0),
-                                            align=0,
-                                            overlay=True
-                                        )
-                                    logger.info(f"Inserted redacted text '{redacted_text}' on page {page_num + 1}")
-                                    break
-                                except Exception as e:
-                                    logger.error(f"Text insertion attempt {attempt + 1} failed: %s", e)
-                                    if attempt < 2:
-                                        font_size *= 0.8
-                                        rect = fitz.Rect(rect[0], rect[1] - 2, rect[2], rect[3] + 2)
-                                        logger.warning(f"Retrying with font size {font_size}, adjusted bbox {rect}")
-                                    else:
-                                        logger.error(f"Final insertion failed, using REDACTED: %s", e)
-                                        page.insert_textbox(
-                                            rect,
-                                            "REDACTED",
-                                            fontname="helv",
-                                            fontsize=font_size,
-                                            color=(0, 0, 0),
-                                            align=0,
-                                            overlay=True
-                                        )
+                    for rect in text_instances:
+                        draw_redaction(page, rect, redaction_type, text=replacement, custom_mask_text=custom_mask_text)
+                        logger.info(f"Redacted '{entity_text}' ({entity_type}) on page {page_num+1}")
+                        redactions_applied = True
         
-        doc.save(output_path, garbage=4, deflate=True, clean=True)
+        doc.save(output_pdf, garbage=4, deflate=True, clean=True)
         doc.close()
-        logger.info(f"Redacted PDF saved to: {output_path}")
+        
+        if redactions_applied:
+            logger.info(f"Successfully redacted PDF and saved to {output_pdf}")
+            return True
+        else:
+            logger.warning("No redactions were applied to the PDF")
+            return False
+    
     except Exception as e:
-        logger.error(f"Failed to redact PDF: %s", e)
-        raise
+        logger.error(f"Error redacting PDF: {e}")
+        return False

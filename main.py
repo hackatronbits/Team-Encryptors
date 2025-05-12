@@ -56,7 +56,15 @@ async def redact_pdf_endpoint(
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
 
+    # Validate file size (max 50MB)
+    max_file_size_mb = 50
+    if file.size > max_file_size_mb * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"File size exceeds {max_file_size_mb}MB limit.")
+
     # Validate parameters
+    if not params.selected_entities:
+        raise HTTPException(status_code=400, detail="At least one PII type must be selected.")
+    
     if params.selected_entities:
         invalid_entities = [e for e in params.selected_entities if e not in PII_ENTITY_LABELS]
         if invalid_entities:
@@ -72,21 +80,28 @@ async def redact_pdf_endpoint(
         raise HTTPException(status_code=400, detail="Custom mask text is required for custom redaction")
 
     # Save uploaded file to temporary location
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=UPLOAD_FOLDER) as temp_input:
-        try:
+    input_path = None
+    output_path = None
+    try:
+        logger.info(f"Processing file: {file.filename}")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=UPLOAD_FOLDER) as temp_input:
             temp_input.write(await file.read())
             input_path = temp_input.name
-        except Exception as e:
-            logger.error(f"Failed to save uploaded file: {e}")
-            os.unlink(temp_input.name)
-            raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
-    # Process PDF
-    try:
-        # Extract text
-        extracted_text = extract_pdf_text(input_path)
-        if not extracted_text:
-            raise HTTPException(status_code=400, detail="Failed to extract text from PDF")
+        # Process PDF
+        status_code, extracted_text, ocr_text_pages = extract_pdf_text(input_path)
+        if status_code == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Failed to extract text from PDF. "
+                    "If this is a scanned PDF, ensure Poppler is installed and POPPLER_PATH is set. "
+                    "See https://github.com/oschwartz10612/poppler-windows for installation."
+                )
+            )
+        
+        if ocr_text_pages:
+            logger.info("Using OCR-extracted text for PII detection")
 
         # Redact text (for logging detected PII types)
         redacted_text, pii_entities = redact_pii(
@@ -108,14 +123,19 @@ async def redact_pdf_endpoint(
             redaction_type=params.redaction_type,
             selected_entities=params.selected_entities,
             threshold=params.threshold,
-            custom_mask_text=params.custom_mask_text
+            custom_mask_text=params.custom_mask_text,
+            ocr_text_pages=ocr_text_pages
         )
 
         if not success:
-            raise HTTPException(status_code=400, detail="No PII detected or redaction failed")
+            raise HTTPException(
+                status_code=400,
+                detail="No PII detected or redaction failed. Adjust detection sensitivity or PII types."
+            )
 
         logger.info(f"Redacted PDF saved to: {output_path}")
         logger.info(f"Detected PII types: {pii_entities}")
+        logger.info(f"File size: {file.size / 1024:.1f} KB")
 
         # Prepare response
         output_filename = f"redacted_{file.filename}"
@@ -125,19 +145,26 @@ async def redact_pdf_endpoint(
             media_type="application/pdf"
         )
 
-        # Clean up files after response (FastAPI will serve the file before cleanup)
-        os.unlink(input_path)
-        os.unlink(output_path)
-
         return response
 
     except Exception as e:
-        logger.error(f"Redaction failed: {e}")
-        if os.path.exists(input_path):
-            os.unlink(input_path)
-        if os.path.exists(output_path):
-            os.unlink(output_path)
-        raise HTTPException(status_code=500, detail=f"Redaction failed: {e}")
+        logger.error(f"Redaction failed for {file.filename}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    finally:
+        # Clean up files
+        if input_path and os.path.exists(input_path):
+            try:
+                os.unlink(input_path)
+                logger.info(f"Cleaned up temporary file: {input_path}")
+            except Exception as e:
+                logger.error(f"Failed to clean up {input_path}: {e}")
+        if output_path and os.path.exists(output_path):
+            try:
+                os.unlink(output_path)
+                logger.info(f"Cleaned up temporary file: {output_path}")
+            except Exception as e:
+                logger.error(f"Failed to clean up {output_path}: {e}")
 
 @app.get("/")
 async def root():
