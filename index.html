@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PDF Redaction Tool</title>
+</head>
+<body>
+  <h2>Upload PDFs for Redaction</h2>
+  <form id="upload-form" enctype="multipart/form-data">
+    <input type="file" name="files" multiple required />
+    <button type="submit">Upload & Redact</button>
+  </form>
+
+  <div id="results"></div>
+
+  <script>
+    const form = document.getElementById("upload-form");
+    const resultsDiv = document.getElementById("results");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const formData = new FormData(form);
+      const response = await fetch("/upload_pdf", {
+        method: "POST",
+        body: formData,
+      });
+
+      const result = await response.json();
+      resultsDiv.innerHTML = "";
+      result.forEach(file => {
+        const link = document.createElement("a");
+        link.href = file.download_link;
+        link.textContent = `Download redacted ${file.filename}`;
+        link.style.display = "block";
+        resultsDiv.appendChild(link);
+      });
+    });
+  </script>
+</body>
+</html>
