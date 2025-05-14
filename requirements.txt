@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 PyMuPDF
-spacy
+spacy<3.7.6
 pytesseract
 pdf2image
 Pillow
